@@ -8,13 +8,16 @@ import java.io.File;
 import java.util.List;
 
 public class MainApp {
-    private JFrame frame;
     private JTextField inputFileField;
     private JTextField outputDirField;
     private JComboBox<String> languageComboBox;
     private JProgressBar progressBar;
     private JLabel progressLabel;
     private ModTranslator translator;
+    private JButton selectModButton;
+    private JButton selectFolderButton;
+    private JButton translateButton;
+    private JCheckBox logsCheckBox;
 
     public MainApp() {
         translator = new ModTranslator();
@@ -22,40 +25,31 @@ public class MainApp {
     }
 
     private void createAndShowGUI() {
-        frame = new JFrame("Minecraft Mod Translator");
+        JFrame frame = new JFrame("Minecraft Mod Translator");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setSize(600, 300);
         frame.setResizable(false);
-        frame.setLayout(new BorderLayout(10, 10));
 
-        // Title Panel
-        JPanel titlePanel = new JPanel();
-        JLabel titleLabel = new JLabel("Minecraft Mod Translator");
-        titleLabel.setFont(new Font("Arial", Font.BOLD, 20));
-        titlePanel.add(titleLabel);
-        frame.add(titlePanel, BorderLayout.NORTH);
-
-        // Main Panel
-        JPanel mainPanel = new JPanel();
-        mainPanel.setLayout(new GridBagLayout());
+        // Main Panel with GridBagLayout
+        JPanel mainPanel = new JPanel(new GridBagLayout());
+        mainPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.fill = GridBagConstraints.HORIZONTAL;
         gbc.insets = new Insets(5, 5, 5, 5);
+        gbc.gridx = 0;
+        gbc.gridy = 0;
+        gbc.weightx = 1.0;
 
         // Input File Panel
         JPanel filePanel = new JPanel(new BorderLayout(5, 0));
         inputFileField = new JTextField(30);
         inputFileField.setEditable(false);
-        JButton browseButton = new JButton("Select Mod");
+        selectModButton = new JButton("Select Mod");
         filePanel.add(inputFileField, BorderLayout.CENTER);
-        filePanel.add(browseButton, BorderLayout.EAST);
+        filePanel.add(selectModButton, BorderLayout.EAST);
 
         // Add Drag and Drop support
         setupDragAndDrop(inputFileField);
 
-        gbc.gridx = 0;
-        gbc.gridy = 0;
-        gbc.gridwidth = 2;
         mainPanel.add(filePanel, gbc);
 
         // Output Directory Panel
@@ -63,24 +57,24 @@ public class MainApp {
         outputDirField = new JTextField(30);
         outputDirField.setEditable(false);
         
-        // Set default output path and create directory
-        File defaultOutputDir = new File("translated_mods");
+        // Set default output directory
+        File defaultOutputDir = new File("target/translated_mods");
         if (!defaultOutputDir.exists()) {
             defaultOutputDir.mkdirs();
         }
         outputDirField.setText(defaultOutputDir.getAbsolutePath());
         
-        JButton outputButton = new JButton("Select Folder");
+        selectFolderButton = new JButton("Select Folder");
         outputPanel.add(outputDirField, BorderLayout.CENTER);
-        outputPanel.add(outputButton, BorderLayout.EAST);
+        outputPanel.add(selectFolderButton, BorderLayout.EAST);
 
         gbc.gridy = 1;
         mainPanel.add(outputPanel, gbc);
 
         // Language Selection
         JPanel langPanel = new JPanel(new BorderLayout(5, 0));
-        JLabel langLabel = new JLabel("Target Language: ");
-        languageComboBox = new JComboBox<>();
+        JLabel langLabel = new JLabel("Target Language:");
+        languageComboBox = new JComboBox<>(translator.getAvailableLanguages());
         langPanel.add(langLabel, BorderLayout.WEST);
         langPanel.add(languageComboBox, BorderLayout.CENTER);
 
@@ -98,20 +92,30 @@ public class MainApp {
         gbc.gridy = 4;
         mainPanel.add(progressLabel, gbc);
 
-        // Translate Button
-        JButton translateButton = new JButton("Translate");
+        // Translate Button Panel (по центру)
+        JPanel translatePanel = new JPanel(new FlowLayout(FlowLayout.CENTER));
+        translateButton = new JButton("Translate");
+        translatePanel.add(translateButton);
         gbc.gridy = 5;
-        mainPanel.add(translateButton, gbc);
+        mainPanel.add(translatePanel, gbc);
 
-        frame.add(mainPanel, BorderLayout.CENTER);
+        // Checkbox Panel (справа)
+        JPanel checkboxPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        logsCheckBox = new JCheckBox("Enable Logs");
+        logsCheckBox.setSelected(false);
+        logsCheckBox.addActionListener(e -> {
+            ModTranslator.setLoggingEnabled(logsCheckBox.isSelected());
+        });
+        checkboxPanel.add(logsCheckBox);
+        gbc.gridy = 6;
+        mainPanel.add(checkboxPanel, gbc);
 
-        // Add languages to combo box
-        for (String language : translator.getAvailableLanguages()) {
-            languageComboBox.addItem(language);
-        }
+        frame.add(mainPanel);
+        frame.pack();
+        frame.setLocationRelativeTo(null);
 
         // Event Handlers
-        browseButton.addActionListener(e -> {
+        selectModButton.addActionListener(e -> {
             JFileChooser fileChooser = new JFileChooser();
             fileChooser.setFileFilter(new javax.swing.filechooser.FileFilter() {
                 public boolean accept(File f) {
@@ -121,13 +125,12 @@ public class MainApp {
                     return "Minecraft Mod Files (*.jar)";
                 }
             });
-            
             if (fileChooser.showOpenDialog(frame) == JFileChooser.APPROVE_OPTION) {
                 inputFileField.setText(fileChooser.getSelectedFile().getAbsolutePath());
             }
         });
 
-        outputButton.addActionListener(e -> {
+        selectFolderButton.addActionListener(e -> {
             JFileChooser dirChooser = new JFileChooser();
             dirChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
             if (dirChooser.showOpenDialog(frame) == JFileChooser.APPROVE_OPTION) {
@@ -141,12 +144,12 @@ public class MainApp {
                 return;
             }
 
-            if (inputFileField.getText().isEmpty()) {
-                JOptionPane.showMessageDialog(frame, "Please select a mod file");
-                return;
-            }
-            if (outputDirField.getText().isEmpty()) {
-                JOptionPane.showMessageDialog(frame, "Please select output directory");
+            String inputFile = inputFileField.getText();
+            String outputDir = outputDirField.getText();
+            String targetLanguage = (String) languageComboBox.getSelectedItem();
+
+            if (inputFile.isEmpty()) {
+                JOptionPane.showMessageDialog(frame, "Please select a mod file to translate!");
                 return;
             }
 
@@ -155,13 +158,14 @@ public class MainApp {
             progressBar.setValue(0);
             progressLabel.setText("Preparing translation...");
 
+            // Set up progress listener
             translator.setProgressListener(new ModTranslator.TranslationProgressListener() {
                 @Override
                 public void onProgress(int current, int total) {
+                    int percentage = (int) ((current / (double) total) * 100);
                     SwingUtilities.invokeLater(() -> {
-                        int percentage = (int) ((current * 100.0) / total);
                         progressBar.setValue(percentage);
-                        progressLabel.setText(String.format("Translated %d of %d lines", current, total));
+                        progressLabel.setText(String.format("Translated %d of %d keys", current, total));
                     });
                 }
 
@@ -187,13 +191,10 @@ public class MainApp {
                 }
             });
 
+            // Start translation in background
             new Thread(() -> {
                 try {
-                    translator.translate(
-                        inputFileField.getText(),
-                        outputDirField.getText(),
-                        (String) languageComboBox.getSelectedItem()
-                    );
+                    translator.translate(inputFile, outputDir, targetLanguage);
                 } catch (Exception ex) {
                     SwingUtilities.invokeLater(() -> {
                         JOptionPane.showMessageDialog(frame, "Translation error: " + ex.getMessage());
@@ -206,7 +207,6 @@ public class MainApp {
             }).start();
         });
 
-        frame.setLocationRelativeTo(null);
         frame.setVisible(true);
     }
 
@@ -223,7 +223,7 @@ public class MainApp {
                         if (file.getName().toLowerCase().endsWith(".jar")) {
                             field.setText(file.getAbsolutePath());
                         } else {
-                            JOptionPane.showMessageDialog(frame, 
+                            JOptionPane.showMessageDialog(null, 
                                 "Please drop a .jar file");
                         }
                     }
