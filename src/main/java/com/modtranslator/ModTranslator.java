@@ -3,6 +3,9 @@ package com.modtranslator;
 import okhttp3.*;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonSyntaxException;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
@@ -11,9 +14,37 @@ import java.util.*;
 import java.util.jar.*;
 import java.util.regex.Pattern;
 import java.net.URLEncoder;
+import java.util.logging.FileHandler;
+import java.util.logging.Logger;
+import java.util.logging.SimpleFormatter;
 
 public class ModTranslator {
     private static final Pattern COLOR_CODE_PATTERN = Pattern.compile("(§[0-9a-fk-or])");
+    private static final Logger LOGGER = Logger.getLogger(ModTranslator.class.getName());
+    private static FileHandler fileHandler;
+    private static boolean loggingEnabled = false;
+    
+    public static void setLoggingEnabled(boolean enabled) {
+        if (enabled != loggingEnabled) {
+            if (enabled) {
+                try {
+                    fileHandler = new FileHandler("mod_translator.log", true);
+                    SimpleFormatter formatter = new SimpleFormatter();
+                    fileHandler.setFormatter(formatter);
+                    LOGGER.addHandler(fileHandler);
+                    loggingEnabled = true;
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            } else if (fileHandler != null) {
+                LOGGER.removeHandler(fileHandler);
+                fileHandler.close();
+                fileHandler = null;
+                loggingEnabled = false;
+            }
+        }
+    }
+    
     private Map<String, String> languageCodes;
     private final OkHttpClient client;
     private final Gson gson;
@@ -170,6 +201,11 @@ public class ModTranslator {
     }
 
     public void translate(String inputJarPath, String outputDirectory, String targetLanguage) throws IOException {
+        LOGGER.info("Starting translation process");
+        LOGGER.info("Input file: " + inputJarPath);
+        LOGGER.info("Output directory: " + outputDirectory);
+        LOGGER.info("Target language: " + targetLanguage);
+
         stopRequested = false;
         File outputDir = new File(outputDirectory);
         if (!outputDir.exists()) {
@@ -179,75 +215,10 @@ public class ModTranslator {
         File inputJar = new File(inputJarPath);
         currentOutputJarPath = Paths.get(outputDirectory, "translated_" + inputJar.getName()).toString();
 
-        // Сначала подсчитаем общее количество строк для перевода
-        totalLines = 0;
-        currentLine = 0;
-        try (JarFile jarFile = new JarFile(inputJar)) {
-            Enumeration<JarEntry> entries = jarFile.entries();
-            while (entries.hasMoreElements()) {
-                JarEntry entry = entries.nextElement();
-                String entryNameLower = entry.getName().toLowerCase();
-                if (entryNameLower.contains("lang/") && entryNameLower.contains("en_us.lang")) {
-                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(jarFile.getInputStream(entry), StandardCharsets.UTF_8))) {
-                        while (reader.readLine() != null) {
-                            totalLines++;
-                        }
-                    }
-                }
-            }
-        }
+        processJarFile(new JarFile(inputJar), new File(currentOutputJarPath), targetLanguage);
 
-        // Теперь выполняем перевод
-        try (JarFile jarFile = new JarFile(inputJar)) {
-            try (JarOutputStream jos = new JarOutputStream(new FileOutputStream(currentOutputJarPath))) {
-                Enumeration<JarEntry> entries = jarFile.entries();
-                
-                while (entries.hasMoreElements() && !stopRequested) {
-                    JarEntry entry = entries.nextElement();
-                    String entryName = entry.getName();
-                    String entryNameLower = entryName.toLowerCase();
-                    
-                    if (entryNameLower.contains("lang/") && entryNameLower.contains("en_us.lang")) {
-                        try (InputStream is = jarFile.getInputStream(entry)) {
-                            byte[] translatedContent = translateLangFile(is, targetLanguage);
-                            
-                            if (stopRequested) {
-                                break;
-                            }
-                            
-                            String langCode = languageCodes.get(targetLanguage);
-                            if (langCode == null) {
-                                throw new IllegalArgumentException("Unsupported language: " + targetLanguage);
-                            }
-                            
-                            String mcLangCode = convertToMinecraftLangCode(langCode);
-                            String originalLangPart = entryName.substring(
-                                entryNameLower.lastIndexOf("en_us.lang"),
-                                entryNameLower.lastIndexOf("en_us.lang") + "en_us.lang".length()
-                            );
-                            String newEntryName = entryName.replace(originalLangPart, mcLangCode + ".lang");
-                            
-                            JarEntry newEntry = new JarEntry(newEntryName);
-                            jos.putNextEntry(newEntry);
-                            jos.write(translatedContent);
-                            jos.closeEntry();
-                        }
-                    } else {
-                        jos.putNextEntry(new JarEntry(entry.getName()));
-                        try (InputStream is = jarFile.getInputStream(entry)) {
-                            byte[] buffer = new byte[1024];
-                            int bytesRead;
-                            while ((bytesRead = is.read(buffer)) != -1) {
-                                jos.write(buffer, 0, bytesRead);
-                            }
-                        }
-                        jos.closeEntry();
-                    }
-                }
-            }
-        }
-        
         if (stopRequested) {
+            LOGGER.info("Translation stopped by user");
             if (progressListener != null) {
                 progressListener.onStopped();
             }
@@ -256,6 +227,7 @@ public class ModTranslator {
                 File outputFile = new File(currentOutputJarPath);
                 if (outputFile.exists()) {
                     outputFile.delete();
+                    LOGGER.info("Deleted incomplete output file");
                 }
             } catch (Exception e) {
                 e.printStackTrace();
@@ -265,60 +237,190 @@ public class ModTranslator {
         }
     }
 
-    private byte[] translateLangFile(InputStream is, String targetLanguage) throws IOException {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
-        StringBuilder result = new StringBuilder();
-        String line;
-
-        while ((line = reader.readLine()) != null && !stopRequested) {
-            if (line.trim().isEmpty() || !line.contains("=")) {
-                result.append(line).append("\n");
-                continue;
-            }
-
-            String[] parts = line.split("=", 2);
-            if (parts.length != 2) {
-                result.append(line).append("\n");
-                continue;
-            }
-
-            String key = parts[0];
-            String value = parts[1];
-
-            List<String> colorCodes = new ArrayList<>();
-            java.util.regex.Matcher matcher = COLOR_CODE_PATTERN.matcher(value);
-            while (matcher.find()) {
-                colorCodes.add(matcher.group());
-            }
-            String textToTranslate = COLOR_CODE_PATTERN.matcher(value).replaceAll("");
-
-            if (stopRequested) {
-                break;
-            }
-
-            String translatedText = translateText(textToTranslate, targetLanguage);
-
-            if (stopRequested) {
-                break;
-            }
-
-            for (String colorCode : colorCodes) {
-                translatedText = colorCode + translatedText;
-            }
-
-            result.append(key).append("=").append(translatedText).append("\n");
-            
-            currentLine++;
-            if (progressListener != null) {
-                progressListener.onProgress(currentLine, totalLines);
+    private void processJarFile(JarFile jarFile, File outputFile, String targetLanguage) throws IOException {
+        LOGGER.info("Starting JAR processing: " + jarFile.getName());
+        String targetLangCode = convertToMinecraftLangCode(languageCodes.get(targetLanguage));
+        
+        try (JarOutputStream jos = new JarOutputStream(new FileOutputStream(outputFile))) {
+            Enumeration<JarEntry> entries = jarFile.entries();
+            while (entries.hasMoreElements() && !stopRequested) {
+                JarEntry entry = entries.nextElement();
+                String entryName = entry.getName();
+                LOGGER.fine("Processing entry: " + entryName);
+                
+                // Копируем текущий файл как есть
+                JarEntry newEntry = new JarEntry(entryName);
+                jos.putNextEntry(newEntry);
+                try (InputStream is = jarFile.getInputStream(entry)) {
+                    byte[] buffer = new byte[1024];
+                    int bytesRead;
+                    while ((bytesRead = is.read(buffer)) != -1) {
+                        jos.write(buffer, 0, bytesRead);
+                    }
+                }
+                jos.closeEntry();
+                
+                // Если это языковой файл, создаем дополнительный переведенный файл
+                if (isLanguageFile(entryName)) {
+                    String newFileName = entryName.toLowerCase().replace("en_us", targetLangCode);
+                    LOGGER.info("Creating additional language file: " + newFileName);
+                    
+                    JarEntry translatedEntry = new JarEntry(newFileName);
+                    jos.putNextEntry(translatedEntry);
+                    
+                    byte[] translatedContent = translateLangFile(jarFile.getInputStream(entry), targetLanguage);
+                    jos.write(translatedContent);
+                    LOGGER.info("Finished creating translated file: " + newFileName);
+                    jos.closeEntry();
+                }
             }
         }
 
         if (stopRequested) {
-            throw new IOException("Translation stopped by user");
+            LOGGER.info("Translation stopped by user");
+            if (outputFile.exists()) {
+                outputFile.delete();
+                LOGGER.info("Deleted incomplete output file");
+            }
+        } else {
+            LOGGER.info("JAR processing completed successfully");
         }
+    }
 
-        return result.toString().getBytes(StandardCharsets.UTF_8);
+    private boolean isLanguageFile(String fileName) {
+        LOGGER.info("Checking file: " + fileName);
+        String lowerFileName = fileName.toLowerCase();
+        return lowerFileName.endsWith("en_us.lang") || lowerFileName.endsWith("en_us.json");
+    }
+
+    private byte[] translateLangFile(InputStream is, String targetLanguage) throws IOException {
+        LOGGER.info("Starting language file translation");
+        
+        // Читаем весь файл в строку для определения формата
+        ByteArrayOutputStream result = new ByteArrayOutputStream();
+        byte[] buffer = new byte[1024];
+        int length;
+        while ((length = is.read(buffer)) != -1) {
+            result.write(buffer, 0, length);
+        }
+        String content = result.toString(StandardCharsets.UTF_8.name());
+        
+        // Определяем формат файла
+        boolean isJsonFormat = content.trim().startsWith("{");
+        LOGGER.info("File format detected: " + (isJsonFormat ? "JSON" : "LANG"));
+        
+        if (isJsonFormat) {
+            try {
+                JsonObject langJson = gson.fromJson(content, JsonObject.class);
+                JsonObject translatedJson = new JsonObject();
+                int totalEntries = langJson.size();
+                int currentEntry = 0;
+                LOGGER.info("Found " + totalEntries + " entries in JSON file");
+
+                for (Map.Entry<String, JsonElement> entry : langJson.entrySet()) {
+                    if (stopRequested) break;
+                    
+                    String key = entry.getKey();
+                    String value = entry.getValue().getAsString();
+                    LOGGER.fine("Processing JSON entry " + currentEntry + "/" + totalEntries + ": " + key);
+
+                    List<String> colorCodes = new ArrayList<>();
+                    java.util.regex.Matcher matcher = COLOR_CODE_PATTERN.matcher(value);
+                    while (matcher.find()) {
+                        colorCodes.add(matcher.group());
+                    }
+                    String textToTranslate = COLOR_CODE_PATTERN.matcher(value).replaceAll("");
+                    
+                    String translatedText = translateText(textToTranslate, targetLanguage);
+                    
+                    // Восстанавливаем цветовые коды
+                    for (String colorCode : colorCodes) {
+                        translatedText = colorCode + translatedText;
+                    }
+                    
+                    translatedJson.addProperty(key, translatedText);
+                    currentEntry++;
+                    if (progressListener != null) {
+                        progressListener.onProgress(currentEntry, totalEntries);
+                    }
+                }
+
+                if (stopRequested) {
+                    throw new IOException("Translation stopped by user");
+                }
+
+                return gson.toJson(translatedJson).getBytes(StandardCharsets.UTF_8);
+            } catch (JsonSyntaxException e) {
+                LOGGER.severe("Error parsing JSON language file: " + e.getMessage());
+                throw new IOException("Invalid JSON format in language file", e);
+            }
+        } else {
+            // Обрабатываем .lang формат
+            BufferedReader reader = new BufferedReader(new StringReader(content));
+            StringBuilder langResult = new StringBuilder();
+            String line;
+            int lineNumber = 0;
+            int totalLines = content.split("\n").length;
+            
+            while ((line = reader.readLine()) != null && !stopRequested) {
+                lineNumber++;
+                LOGGER.fine("Processing line " + lineNumber + ": " + line);
+                
+                if (line.trim().isEmpty() || !line.contains("=")) {
+                    LOGGER.fine("Skipping line " + lineNumber + " (empty or no translation needed)");
+                    langResult.append(line).append("\n");
+                    continue;
+                }
+
+                String[] parts = line.split("=", 2);
+                if (parts.length != 2) {
+                    LOGGER.fine("Skipping malformed line " + lineNumber);
+                    langResult.append(line).append("\n");
+                    continue;
+                }
+
+                String key = parts[0];
+                String value = parts[1];
+                LOGGER.fine("Key: " + key + ", Original value: " + value);
+
+                List<String> colorCodes = new ArrayList<>();
+                java.util.regex.Matcher matcher = COLOR_CODE_PATTERN.matcher(value);
+                while (matcher.find()) {
+                    colorCodes.add(matcher.group());
+                }
+                String textToTranslate = COLOR_CODE_PATTERN.matcher(value).replaceAll("");
+                LOGGER.fine("Text to translate (without color codes): " + textToTranslate);
+
+                if (stopRequested) {
+                    break;
+                }
+
+                String translatedText = translateText(textToTranslate, targetLanguage);
+                LOGGER.fine("Translated text: " + translatedText);
+
+                if (stopRequested) {
+                    break;
+                }
+
+                for (String colorCode : colorCodes) {
+                    translatedText = colorCode + translatedText;
+                }
+                LOGGER.fine("Final text with color codes: " + translatedText);
+
+                langResult.append(key).append("=").append(translatedText).append("\n");
+                
+                if (progressListener != null) {
+                    progressListener.onProgress(lineNumber, totalLines);
+                }
+            }
+
+            if (stopRequested) {
+                throw new IOException("Translation stopped by user");
+            }
+
+            LOGGER.info("Finished translating language file, processed " + lineNumber + " lines");
+            return langResult.toString().getBytes(StandardCharsets.UTF_8);
+        }
     }
 
     private String translateText(String text, String targetLanguage) {
@@ -335,6 +437,7 @@ public class ModTranslator {
             
             String targetLangCode = languageCodes.get(targetLanguage);
             if (targetLangCode == null) {
+                LOGGER.warning("Unsupported language: " + targetLanguage);
                 throw new IllegalArgumentException("Unsupported language: " + targetLanguage);
             }
 
@@ -345,6 +448,7 @@ public class ModTranslator {
                 encodedText
             );
 
+            LOGGER.fine("Translating text: " + text);
             Request request = new Request.Builder()
                 .url(url)
                 .header("User-Agent", "Mozilla/5.0")
@@ -352,6 +456,7 @@ public class ModTranslator {
 
             try (Response response = client.newCall(request).execute()) {
                 if (!response.isSuccessful()) {
+                    LOGGER.warning("Translation request failed: " + response.code());
                     return text;
                 }
 
@@ -367,11 +472,14 @@ public class ModTranslator {
                                 translatedText.append(translationPart.get(0).getAsString());
                             }
                         }
+                        LOGGER.fine("Translation successful: " + translatedText.toString());
                         return translatedText.toString();
                     }
                 }
+                LOGGER.warning("Failed to parse translation response");
             }
         } catch (Exception e) {
+            LOGGER.severe("Error translating text: " + text + "\nError: " + e.getMessage());
             e.printStackTrace();
         }
         return text;
