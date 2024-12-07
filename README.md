@@ -44,10 +44,3 @@ A Java desktop application that helps translate Minecraft mod language files int
 - Gson (2.8.9) - JSON parsing
 - Maven - Project management
 
-## License
-
-This project is open source and available under the MIT License.
-
-## Contributing
-
-Feel free to submit issues and pull requests to help improve the application.
